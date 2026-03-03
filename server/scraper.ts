@@ -3,27 +3,27 @@ import { log } from "./index";
 
 const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY;
 
-const categorySlugMap: Record<string, string> = {
-  "44": "phones-telecommunications",
+const categorySearchTerms: Record<string, string> = {
+  "44": "phones",
   "509": "computer-office",
-  "7": "consumer-electronics",
-  "320": "toys-hobbies",
+  "7": "electronics",
+  "320": "toys",
   "2": "home-garden",
-  "36": "sports-entertainment",
+  "36": "sports",
   "1501": "mother-kids",
   "6": "home-appliances",
   "1524": "fashion-accessories",
   "200003655": "beauty-health",
-  "34": "automobiles-motorcycles",
-  "30": "jewelry-accessories",
+  "34": "automobiles",
+  "30": "jewelry",
   "100003109": "tools",
-  "1503": "shoes-bags",
+  "1503": "bags-shoes",
   "200003482": "womens-clothing",
   "200000532": "mens-clothing",
 };
 
-function buildCategoryUrl(categoryId: string, sortBy: string, page: number): string {
-  const slug = categorySlugMap[categoryId] || "all";
+function buildSearchUrl(categoryId: string, sortBy: string, page: number): string {
+  const term = categorySearchTerms[categoryId] || "products";
   let sortParam = "";
   switch (sortBy) {
     case "orders":
@@ -41,7 +41,7 @@ function buildCategoryUrl(categoryId: string, sortBy: string, page: number): str
     default:
       sortParam = "&SortType=total_tranpro_desc";
   }
-  return `https://www.aliexpress.com/category/${categoryId}/${slug}.html?page=${page}${sortParam}&g=y`;
+  return `https://www.aliexpress.com/w/wholesale-${term}.html?catId=${categoryId}${sortParam}&page=${page}&g=y`;
 }
 
 function extractProductsFromHtml(html: string): Product[] {
@@ -56,7 +56,7 @@ function extractProductsFromHtml(html: string): Product[] {
     if (seen.has(id)) continue;
     seen.add(id);
 
-    const block = blockMatch[2].substring(0, 2000);
+    const block = blockMatch[2].substring(0, 3000);
 
     let title = "";
     const titleMatch = block.match(/"displayTitle"\s*:\s*"([^"]+)"/);
@@ -64,8 +64,12 @@ function extractProductsFromHtml(html: string): Product[] {
       title = titleMatch[1].replace(/<[^>]*>/g, "");
     }
     if (!title) {
-      const seoTitleMatch = block.match(/"seoTitle"\s*:\s*"([^"]+)"/);
-      if (seoTitleMatch) title = seoTitleMatch[1].replace(/<[^>]*>/g, "");
+      const seoMatch = block.match(/"seoTitle"\s*:\s*"([^"]+)"/);
+      if (seoMatch) title = seoMatch[1].replace(/<[^>]*>/g, "");
+    }
+    if (!title) {
+      const plainMatch = block.match(/"title"\s*:\s*"([^"]{5,200})"/);
+      if (plainMatch) title = plainMatch[1].replace(/<[^>]*>/g, "");
     }
 
     let imageUrl = "";
@@ -75,17 +79,25 @@ function extractProductsFromHtml(html: string): Product[] {
     }
 
     let salePrice = "";
-    const salePriceMatch = block.match(/"salePrice"\s*:\{[^}]*?"formattedPrice"\s*:\s*"([^"]+)"/);
+    const salePriceMatch = block.match(/"salePrice"\s*:\s*\{[^}]*?"formattedPrice"\s*:\s*"([^"]+)"/);
     if (salePriceMatch) {
       salePrice = salePriceMatch[1];
     }
     if (!salePrice) {
-      const minPriceMatch = block.match(/"salePrice"\s*:\{[^}]*?"minPrice"\s*:\s*([\d.]+)/);
+      const minPriceMatch = block.match(/"salePrice"\s*:\s*\{[^}]*?"minPrice"\s*:\s*([\d.]+)/);
       if (minPriceMatch) salePrice = `US $${minPriceMatch[1]}`;
+    }
+    if (!salePrice) {
+      const anyPriceMatch = block.match(/"formattedPrice"\s*:\s*"([^"]+)"/);
+      if (anyPriceMatch) salePrice = anyPriceMatch[1];
+    }
+    if (!salePrice) {
+      const centMatch = block.match(/"minPriceCent"\s*:\s*(\d+)/);
+      if (centMatch) salePrice = `US $${(parseInt(centMatch[1]) / 100).toFixed(2)}`;
     }
 
     let originalPrice = "";
-    const origPriceMatch = block.match(/"originalPrice"\s*:\{[^}]*?"formattedPrice"\s*:\s*"([^"]+)"/);
+    const origPriceMatch = block.match(/"originalPrice"\s*:\s*\{[^}]*?"formattedPrice"\s*:\s*"([^"]+)"/);
     if (origPriceMatch) {
       originalPrice = origPriceMatch[1];
     }
@@ -94,6 +106,10 @@ function extractProductsFromHtml(html: string): Product[] {
     const tradeMatch = block.match(/"tradeDesc"\s*:\s*"([^"]+)"/);
     if (tradeMatch) {
       orders = tradeMatch[1];
+    }
+    if (!orders) {
+      const soldMatch = block.match(/"sold"\s*:\s*"?(\d+)"?/);
+      if (soldMatch) orders = `${soldMatch[1]} sold`;
     }
 
     let rating = "";
@@ -118,7 +134,12 @@ function extractProductsFromHtml(html: string): Product[] {
       discount = `-${discountMatch[1]}%`;
     }
 
-    const productUrl = `https://www.aliexpress.com/item/${id}.html`;
+    let productUrl = `https://www.aliexpress.com/item/${id}.html`;
+    const urlMatch = block.match(/"productDetailUrl"\s*:\s*"([^"]+)"/);
+    if (urlMatch) {
+      const u = urlMatch[1];
+      productUrl = u.startsWith("//") ? `https:${u}` : u.startsWith("http") ? u : productUrl;
+    }
 
     if (title && title.length > 3) {
       products.push({
@@ -136,7 +157,54 @@ function extractProductsFromHtml(html: string): Product[] {
     }
   }
 
-  return products;
+  if (products.length === 0) {
+    const linkRegex = /href="((?:https?:)?\/\/(?:www\.)?aliexpress\.(?:com|us)\/item\/(\d+)\.html[^"]*)"/g;
+    const titleRegex = /<(?:h[1-6]|span|div|a)[^>]*class="[^"]*(?:title|name|subject)[^"]*"[^>]*>([^<]{5,200})<\//gi;
+    const priceRegex = /US\s*\$\s*(\d+[\.,]\d{0,2})/gi;
+    const imgRegex = /(?:src|data-src)="((?:https?:)?\/\/[^"]*(?:alicdn|aliexpress-media)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"/gi;
+
+    const links: { url: string; id: string }[] = [];
+    const titles: string[] = [];
+    const prices: string[] = [];
+    const images: string[] = [];
+
+    let m;
+    while ((m = linkRegex.exec(html)) !== null) {
+      const url = m[1].startsWith("//") ? `https:${m[1]}` : m[1];
+      if (!links.find(l => l.id === m[2])) {
+        links.push({ url, id: m[2] });
+      }
+    }
+
+    while ((m = titleRegex.exec(html)) !== null) {
+      const t = m[1].trim();
+      if (t.length > 5 && t.length < 200) titles.push(t);
+    }
+
+    while ((m = priceRegex.exec(html)) !== null) {
+      prices.push(`US $${m[1]}`);
+    }
+
+    while ((m = imgRegex.exec(html)) !== null) {
+      const url = m[1].startsWith("//") ? `https:${m[1]}` : m[1];
+      if (!url.includes("icon") && !url.includes("logo") && !url.includes("sprite") && !url.includes("banner")) {
+        images.push(url);
+      }
+    }
+
+    const count = Math.min(links.length, titles.length);
+    for (let i = 0; i < count; i++) {
+      products.push({
+        id: links[i].id,
+        title: titles[i],
+        price: prices[i] || "Price unavailable",
+        imageUrl: images[i] || "",
+        productUrl: links[i].url,
+      });
+    }
+  }
+
+  return products.filter(p => p.title && p.title.length > 3);
 }
 
 async function fetchWithScraperApi(url: string, useRender: boolean, timeoutMs: number): Promise<string> {
@@ -182,9 +250,9 @@ export async function scrapeAliexpress(
 
   const category = aliexpressCategories.find(c => c.id === categoryId);
   const categoryName = category?.name || "Unknown Category";
-  const targetUrl = buildCategoryUrl(categoryId, sortBy, page);
+  const targetUrl = buildSearchUrl(categoryId, sortBy, page);
 
-  log(`Scraping category page (rendered): ${targetUrl}`, "scraper");
+  log(`Scraping: ${targetUrl}`, "scraper");
 
   const html = await fetchWithScraperApi(targetUrl, true, 90000);
   log(`Received ${html.length} bytes`, "scraper");
